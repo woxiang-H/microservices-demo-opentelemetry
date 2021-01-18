@@ -1,0 +1,74 @@
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Threading;
+using OpenTelemetry;
+using OpenTelemetry.Trace;
+using StackExchange.Redis;
+
+namespace cartservice
+{
+    internal class Redis
+    {
+        internal static object Run()
+	{
+	    using var connection = ConnectionMultiplexer.Connect("redis-cart:6379");
+	    using var openTelemetry = Sdk.CreateTracerProviderBuilder()
+		.AddRedisInstrumentation(connection, options =>
+		{
+		    options.FlushInterval = TimeSpan.FromSeconds(5);
+		})
+		.AddZipkinExporter(o =>
+		{
+		    o.ServiceName = "cartservice";
+		    o.Endpoint = new Uri("http://zipkin:9411/api/v2/spans");
+		})
+		.Build();
+	    Console.WriteLine("Redis initialization completed");
+	    ActivitySource activitySource = new ActivitySource("redis-test");
+
+            var db = connection.GetDatabase();
+
+            using (activitySource.StartActivity("Main"))
+            {
+                System.Console.WriteLine("About to do a busy work");
+                for (var i = 0; i < 10; i++)
+                {
+                    DoWork(db, activitySource);
+                }
+            }
+
+            return null;
+        }
+
+        private static void DoWork(IDatabase db, ActivitySource activitySource)
+        {
+
+            using (Activity activity = activitySource.StartActivity("DoWork"))
+            {
+                try
+                {
+                    db.StringSet("key", "value " + DateTime.Now.ToLongDateString());
+
+                    System.Console.WriteLine("Doing busy work");
+                    Thread.Sleep(1000);
+
+                    var myVal = db.StringGet("key");
+
+                    System.Console.WriteLine(myVal);
+                }
+                catch (ArgumentOutOfRangeException e)
+                {
+                    activity.SetStatus(Status.Error.WithDescription(e.ToString()));
+                }
+
+                var attributes = new Dictionary<string, object>
+                {
+                    { "use", "demo" },
+                };
+                ActivityTagsCollection eventTags = new ActivityTagsCollection(attributes);
+                activity.AddEvent(new ActivityEvent("Invoking DoWork", default, eventTags));
+            }
+        }
+    }
+}
